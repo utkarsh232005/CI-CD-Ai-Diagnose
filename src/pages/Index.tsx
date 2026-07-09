@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { PipelineVisualization } from "@/components/PipelineVisualization";
 import { Navbar } from "@/components/Navbar";
 import { Activity, BarChart3, RefreshCw, GitBranch, Clock, User, ExternalLink, Sparkles, AlertTriangle, CheckCircle2, Wand2, Loader2, Menu } from "lucide-react";
@@ -344,6 +344,12 @@ const Index = () => {
     }
   }, [selectedRepo, handleLogout]);
 
+  // Keep a stable ref of the latest fetchWorkflows callback to break render/reconnection loops
+  const fetchWorkflowsRef = useRef(fetchWorkflows);
+  useEffect(() => {
+    fetchWorkflowsRef.current = fetchWorkflows;
+  }, [fetchWorkflows]);
+
   // URL token parsing
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -367,26 +373,27 @@ const Index = () => {
     }
   }, [token, fetchRepositories]);
 
-  // WebSocket repo subscription & polling setup
+  // Fetch workflows when token or repo changes
   useEffect(() => {
     if (!token) return;
 
     if (token === "demo_mode_token") {
-      fetchWorkflows();
+      fetchWorkflowsRef.current();
     } else if (selectedRepo) {
-      fetchWorkflows(false, selectedRepo);
+      fetchWorkflowsRef.current(false, selectedRepo);
     }
+  }, [selectedRepo, token]);
 
-    if (socket && token) {
-      if (token !== "demo_mode_token" && selectedRepo) {
-        socket.emit("subscribe:repo", {
-          owner: selectedRepo.owner.login,
-          repo: selectedRepo.name,
-          token: token
-        });
-      }
+  // Emit WebSocket repo subscription
+  useEffect(() => {
+    if (socket && token && token !== "demo_mode_token" && selectedRepo) {
+      socket.emit("subscribe:repo", {
+        owner: selectedRepo.owner.login,
+        repo: selectedRepo.name,
+        token: token
+      });
     }
-  }, [selectedRepo, token, socket, fetchWorkflows]);
+  }, [selectedRepo, token, socket]);
 
   // Setup WebSocket connection
   useEffect(() => {
@@ -397,14 +404,14 @@ const Index = () => {
       const { action } = data;
       console.log('GitHub workflow event:', action);
       if (action === 'requested' || action === 'in_progress' || action === 'completed') {
-        fetchWorkflows(true);
+        fetchWorkflowsRef.current(true);
       }
     });
 
     return () => {
       newSocket.close();
     };
-  }, [fetchWorkflows]);
+  }, []);
 
   // Polling setup
   useEffect(() => {
@@ -412,18 +419,18 @@ const Index = () => {
 
     const interval = setInterval(() => {
       if (token === "demo_mode_token") {
-        fetchWorkflows();
+        fetchWorkflowsRef.current();
       } else if (selectedRepo) {
-        fetchWorkflows(false, selectedRepo);
+        fetchWorkflowsRef.current(false, selectedRepo);
       }
     }, 15000);
 
     const handleVisibilityChange = () => {
       if (!document.hidden) {
         if (token === "demo_mode_token") {
-          fetchWorkflows(true);
+          fetchWorkflowsRef.current(true);
         } else if (selectedRepo) {
-          fetchWorkflows(true, selectedRepo);
+          fetchWorkflowsRef.current(true, selectedRepo);
         }
       }
     };
@@ -434,7 +441,7 @@ const Index = () => {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [selectedRepo, token, fetchWorkflows]);
+  }, [selectedRepo, token]);
 
   const refreshWorkflows = async () => {
     await fetchWorkflows(true, selectedRepo);
