@@ -7,7 +7,6 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
 // Load environment variables from .env file
@@ -811,6 +810,7 @@ app.get('/api/info', (req, res) => {
 // Integrate Vite Middleware
 if (process.env.NODE_ENV !== "production") {
     console.log("⚡ Starting Vite Dev Server Middleware...");
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa"
