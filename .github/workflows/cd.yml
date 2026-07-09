@@ -1,0 +1,81 @@
+name: CD - Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  deploy-vercel:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Notify deployment start
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "started", "workflow": "${{ github.workflow }}", "run_id": "${{ github.run_id }}"}'
+        continue-on-error: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Notify dependency installation
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "progress", "step": "Installing dependencies", "progress": 20}'
+        continue-on-error: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Notify build start
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "progress", "step": "Building application", "progress": 60}'
+        continue-on-error: true
+
+      - name: Build application
+        run: npm run build
+
+      - name: Notify deployment
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "progress", "step": "Deploying to Vercel", "progress": 80}'
+        continue-on-error: true
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        id: vercel-deploy
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod"
+          working-directory: ./
+
+      - name: Notify completion
+        if: success()
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "completed", "url": "${{ steps.vercel-deploy.outputs.preview-url }}", "progress": 100}'
+        continue-on-error: true
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.WEBHOOK_URL || 'http://localhost:3001' }}/api/webhook/deployment" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "failed", "error": "Deployment failed at step ${{ github.job }}"}'
+        continue-on-error: true

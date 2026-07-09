@@ -1,0 +1,23 @@
+services:
+  # WebSocket Server
+  - type: web
+    name: ci-cd-websocket-server
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: cd server && npm install
+    startCommand: node server/websocket-server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_OWNER
+        value: utkarsh232005
+      - key: GITHUB_REPO
+        value: CI-CD
+      - key: FRONTEND_URL
+        sync: false
+    healthCheckPath: /health

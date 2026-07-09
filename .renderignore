@@ -1,0 +1,80 @@
+# Render ignore file - exclude files not needed for server deployment
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Frontend source (not needed for server)
+src/
+public/
+index.html
+
+# Testing
+coverage/
+*.test.js
+*.spec.js
+
+# Development files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Build outputs (frontend)
+dist/
+dist-ssr/
+build/
+
+# Temporary files
+*.log
+.cache/
+temp/
+tmp/
+
+# Documentation (optional - remove if you want to include)
+*.md
+!README.md
+
+# Config files (frontend)
+vite.config.ts
+tsconfig.json
+tsconfig.app.json
+tsconfig.node.json
+tailwind.config.ts
+postcss.config.js
+components.json
+eslint.config.js
+
+# Scripts
+*.sh
+!start-dev.sh
+
+# Docker files
+Dockerfile
+docker-compose.yml
+nginx.conf
+
+# Vercel/Netlify configs
+vercel.json
+netlify.toml
+firebase.json
