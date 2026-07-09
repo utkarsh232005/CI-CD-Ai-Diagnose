@@ -354,7 +354,10 @@ app.get('/api/auth/github', (req, res) => {
 
 app.get('/api/auth/github/callback', async (req, res) => {
     const { code } = req.query;
-    const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+    let frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+    if (frontendUrl.includes(',')) {
+        frontendUrl = frontendUrl.split(',')[0].trim();
+    }
     console.log('📥 OAuth: Callback received. Code query parameter present:', !!code);
     if (!code) {
         console.warn('⚠️ OAuth: No authorization code received from GitHub.');
