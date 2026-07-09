@@ -595,6 +595,36 @@ const Index = () => {
               using automated Gemini telemetry.
             </p>
 
+            {token && repos && repos.length > 0 && (
+              <div className="flex flex-col gap-2 pt-4">
+                <span className="text-[10px] font-mono text-[#93939f] uppercase tracking-widest font-bold">
+                  Active Repository In Focus
+                </span>
+                <div className="relative inline-block w-full max-w-md">
+                  <select
+                    value={selectedRepo ? selectedRepo.full_name : ""}
+                    onChange={(e) => {
+                      const repo = repos.find(r => r.full_name === e.target.value);
+                      if (repo) handleSelectRepo(repo);
+                    }}
+                    className="w-full bg-[#fcfbfa] hover:bg-[#eeece7] border border-[#d9d9dd] hover:border-black text-[#212121] text-xs font-mono font-bold uppercase tracking-wider py-3 px-4 rounded-xl appearance-none cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#ff7759] pr-10 shadow-sm transition-all"
+                  >
+                    <option value="" disabled>Select a repository...</option>
+                    {repos.map((r) => (
+                      <option key={r.id} value={r.full_name}>
+                        {r.full_name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-[#75758a]">
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-4 pt-4">
               <Link to="/dashboard">
                 <Button className="cohere-pill-primary text-xs h-10 px-5 font-mono font-bold uppercase tracking-wider shadow-none rounded-lg flex items-center gap-2">

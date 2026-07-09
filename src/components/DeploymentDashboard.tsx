@@ -86,7 +86,6 @@ const DeploymentDashboard = () => {
   const handleSelectRepo = (repo: GitHubRepository) => {
     setSelectedRepo(repo);
     localStorage.setItem("selected_repo", JSON.stringify(repo));
-    window.location.href = "/";
   };
 
   useEffect(() => {
@@ -319,6 +318,36 @@ const DeploymentDashboard = () => {
             <p className="text-lg md:text-xl text-[#75758a] font-sans leading-relaxed tracking-tight max-w-3xl">
               Initiate instant cluster builds, trace terminal process output live, and observe repository commit synchronization within a unified dashboard interface.
             </p>
+
+            {token && repos && repos.length > 0 && (
+              <div className="flex flex-col gap-2 pt-4">
+                <span className="text-[10px] font-mono text-[#93939f] uppercase tracking-widest font-bold">
+                  Active Repository In Focus
+                </span>
+                <div className="relative inline-block w-full max-w-md">
+                  <select
+                    value={selectedRepo ? selectedRepo.full_name : ""}
+                    onChange={(e) => {
+                      const repo = repos.find(r => r.full_name === e.target.value);
+                      if (repo) handleSelectRepo(repo);
+                    }}
+                    className="w-full bg-[#fcfbfa] hover:bg-[#eeece7] border border-[#d9d9dd] hover:border-black text-[#212121] text-xs font-mono font-bold uppercase tracking-wider py-3 px-4 rounded-xl appearance-none cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#ff7759] pr-10 shadow-sm transition-all"
+                  >
+                    <option value="" disabled>Select a repository...</option>
+                    {repos.map((r) => (
+                      <option key={r.id} value={r.full_name}>
+                        {r.full_name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-[#75758a]">
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -576,6 +605,8 @@ const DeploymentDashboard = () => {
                   onDiagnose={diagnoseWorkflow} 
                   diagnosingRunId={diagnosingRunId} 
                   isDiagnosing={isDiagnosing} 
+                  selectedRepo={selectedRepo}
+                  token={token}
                 />
               </div>
             </div>
@@ -624,23 +655,24 @@ interface GitHubActionsStatusProps {
   onDiagnose: (runId: number) => void;
   diagnosingRunId: number | null;
   isDiagnosing: boolean;
+  selectedRepo: GitHubRepository | null;
+  token: string | null;
 }
 
-const GitHubActionsStatus = ({ onDiagnose, diagnosingRunId, isDiagnosing }: GitHubActionsStatusProps) => {
+const GitHubActionsStatus = ({ 
+  onDiagnose, 
+  diagnosingRunId, 
+  isDiagnosing,
+  selectedRepo,
+  token
+}: GitHubActionsStatusProps) => {
   const [workflows, setWorkflows] = useState<GitHubWorkflowRun[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchWorkflowRuns();
-    const interval = setInterval(fetchWorkflowRuns, 30000); // Update every 30 seconds
-    return () => {
-      clearInterval(interval);
-    };
-  }, []);
-
-  const fetchWorkflowRuns = async () => {
+  const fetchWorkflowRuns = useCallback(async () => {
     try {
-      const response = await fetch("/api/github/workflows");
+      const repoParam = selectedRepo ? `?owner=${selectedRepo.owner.login}&repo=${selectedRepo.name}` : "";
+      const response = await fetch(`/api/github/workflows${repoParam}`);
       if (response.ok) {
         const data = await response.json();
         setWorkflows(data.workflow_runs || []);
@@ -650,7 +682,16 @@ const GitHubActionsStatus = ({ onDiagnose, diagnosingRunId, isDiagnosing }: GitH
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedRepo]);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchWorkflowRuns();
+    const interval = setInterval(fetchWorkflowRuns, 30000); // Update every 30 seconds
+    return () => {
+      clearInterval(interval);
+    };
+  }, [fetchWorkflowRuns]);
 
   const getStatusTextClass = (status: string, conclusion: string | null) => {
     if (status === "in_progress") return "text-[#1863dc] bg-[#f1f5ff] border-[#1863dc]/25";
