@@ -1,4 +1,13 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
+
+interface GitHubRepository {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: {
+    login: string;
+  };
+}
 import { io, Socket } from "socket.io-client";
 import { Link } from "react-router-dom";
 import { ArrowLeft, RefreshCw, Activity, Terminal, GitBranch, Shield, Zap, Sparkles, ExternalLink, Trash2, Menu, AlertTriangle, CheckCircle2, Loader2, Wand2 } from "lucide-react";
@@ -42,6 +51,17 @@ interface GitHubWorkflowEvent {
 }
 
 const DeploymentDashboard = () => {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("github_token"));
+  const [repos, setRepos] = useState<GitHubRepository[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<GitHubRepository | null>(() => {
+    const cached = localStorage.getItem("selected_repo");
+    try {
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [deploymentStatus, setDeploymentStatus] = useState({
     stage: "idle",
     progress: 0,
@@ -53,6 +73,58 @@ const DeploymentDashboard = () => {
 
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isNavbarOpen, setIsNavbarOpen] = useState(false);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem("github_token");
+    localStorage.removeItem("selected_repo");
+    setToken(null);
+    setRepos([]);
+    setSelectedRepo(null);
+    window.location.href = "/";
+  }, []);
+
+  const handleSelectRepo = (repo: GitHubRepository) => {
+    setSelectedRepo(repo);
+    localStorage.setItem("selected_repo", JSON.stringify(repo));
+    window.location.href = "/";
+  };
+
+  useEffect(() => {
+    if (token && token !== "demo_mode_token") {
+      fetch("/api/github/user/repos", {
+        headers: {
+          "Authorization": `Bearer ${token}`
+        }
+      })
+      .then(res => {
+        if (res.status === 401) {
+          handleLogout();
+        }
+        return res.json();
+      })
+      .then(data => {
+        if (data.repositories) {
+          setRepos(data.repositories);
+        }
+      })
+      .catch(err => console.error("Error fetching repos on dashboard:", err));
+    } else if (token === "demo_mode_token") {
+      setRepos([
+        {
+          id: 111,
+          name: "CI-CD-pipeline",
+          full_name: "demo-user/CI-CD-pipeline",
+          owner: { login: "demo-user" }
+        },
+        {
+          id: 222,
+          name: "production-release",
+          full_name: "demo-user/production-release",
+          owner: { login: "demo-user" }
+        }
+      ]);
+    }
+  }, [token, handleLogout]);
 
   const [diagnosingRunId, setDiagnosingRunId] = useState<number | null>(null);
   const [activeDiagnosis, setActiveDiagnosis] = useState<{
@@ -225,7 +297,13 @@ const DeploymentDashboard = () => {
   return (
     <div className="min-h-screen bg-white text-[#212121] selection:bg-[#ffad9b] selection:text-[#17171c] font-sans antialiased">
       {/* 1. Navigation Header */}
-      <Navbar />
+      <Navbar 
+        token={token}
+        repos={repos}
+        selectedRepo={selectedRepo}
+        onSelectRepo={handleSelectRepo}
+        onLogout={handleLogout}
+      />
 
       {/* 2. Hero Section */}
       <section className="bg-white pt-16 pb-12 px-8 border-b border-[#d9d9dd]">

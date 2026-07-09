@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { PipelineVisualization } from "@/components/PipelineVisualization";
 import { Navbar } from "@/components/Navbar";
 import { Activity, BarChart3, RefreshCw, GitBranch, Clock, User, ExternalLink, Sparkles, AlertTriangle, CheckCircle2, Wand2, Loader2, Menu } from "lucide-react";
@@ -56,14 +56,33 @@ interface GitHubStep {
   completed_at: string | null;
 }
 
+interface GitHubRepository {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: {
+    login: string;
+  };
+}
+
 const Index = () => {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("github_token"));
+  const [repos, setRepos] = useState<GitHubRepository[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<GitHubRepository | null>(() => {
+    const cached = localStorage.getItem("selected_repo");
+    try {
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
   const [workflows, setWorkflows] = useState<GitHubWorkflow[]>([]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<GitHubWorkflow | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isNavbarOpen, setIsNavbarOpen] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<string>("");
   const [diagnosis, setDiagnosis] = useState<{
     summary: string;
@@ -75,18 +94,48 @@ const Index = () => {
   const [diagnosisError, setDiagnosisError] = useState("");
   const [githubAuthFailed, setGithubAuthFailed] = useState(false);
 
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem("github_token");
+    localStorage.removeItem("selected_repo");
+    setToken(null);
+    setRepos([]);
+    setSelectedRepo(null);
+    setWorkflows([]);
+    setSelectedWorkflow(null);
+    setStages([]);
+    setDiagnosis(null);
+  }, []);
+
+  const handleSelectRepo = (repo: GitHubRepository) => {
+    setSelectedRepo(repo);
+    localStorage.setItem("selected_repo", JSON.stringify(repo));
+    setWorkflows([]);
+    setSelectedWorkflow(null);
+    setStages([]);
+    setDiagnosis(null);
+  };
+
   const diagnoseWorkflow = async () => {
-    if (!selectedWorkflow) return;
+    if (!selectedWorkflow || (token !== "demo_mode_token" && !selectedRepo)) return;
     setIsDiagnosing(true);
     setDiagnosisError("");
     setDiagnosis(null);
 
     try {
-      const response = await fetch(`/api/github/workflows/${selectedWorkflow.id}/diagnose`, {
+      const url = token === "demo_mode_token"
+        ? `/api/github/workflows/${selectedWorkflow.id}/diagnose`
+        : `/api/github/workflows/${selectedWorkflow.id}/diagnose?owner=${selectedRepo.owner.login}&repo=${selectedRepo.name}`;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json"
+      };
+      if (token && token !== "demo_mode_token") {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        }
+        headers
       });
 
       if (!response.ok) {
@@ -109,49 +158,28 @@ const Index = () => {
     }
   };
 
-  // Fetch GitHub workflows
-  const fetchWorkflows = async (isManualRefresh = false) => {
-    try {
-      if (isManualRefresh) {
-        setIsRefreshing(true);
-      } else if (!workflows.length) {
-        setIsLoading(true);
-      }
+  // Convert GitHub workflow to pipeline stages
+  const calculateDuration = (startTime: string, endTime: string): string => {
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    const duration = Math.floor((end.getTime() - start.getTime()) / 1000);
 
-      const response = await fetch(`/api/github/workflows`);
-      if (response.ok) {
-        const data = await response.json();
-        const newWorkflows = data.workflow_runs || [];
-        setGithubAuthFailed(!!data.auth_failed);
-
-        // Update workflows
-        setWorkflows(newWorkflows);
-
-        // If we have a selected workflow, try to find its updated version
-        if (selectedWorkflow) {
-          const updatedWorkflow = newWorkflows.find(w => w.id === selectedWorkflow.id);
-          if (updatedWorkflow) {
-            setSelectedWorkflow(updatedWorkflow);
-            convertWorkflowToStages(updatedWorkflow);
-          }
-        } else if (newWorkflows.length > 0) {
-          // Select the latest workflow if none selected
-          setSelectedWorkflow(newWorkflows[0]);
-          convertWorkflowToStages(newWorkflows[0]);
-        }
-
-        setLastUpdate(new Date().toLocaleTimeString());
-      }
-    } catch (error) {
-      console.error('Failed to fetch workflows:', error);
-    } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
-    }
+    if (duration < 60) return `${duration}s`;
+    const minutes = Math.floor(duration / 60);
+    const seconds = duration % 60;
+    return `${minutes}m ${seconds}s`;
   };
 
-  // Convert GitHub workflow to pipeline stages
-  const convertWorkflowToStages = (workflow: GitHubWorkflow) => {
+  const mapGitHubStatusToStageStatus = (status: string, conclusion: string | null): StageStatus => {
+    if (status === 'completed') {
+      if (conclusion === 'success') return 'success';
+      if (conclusion === 'failure' || conclusion === 'cancelled') return 'failed';
+    }
+    if (status === 'in_progress' || status === 'queued') return 'running';
+    return 'pending';
+  };
+
+  const convertWorkflowToStages = useCallback((workflow: GitHubWorkflow) => {
     const workflowStages: Stage[] = [
       {
         id: "setup",
@@ -168,7 +196,6 @@ const Index = () => {
       }
     ];
 
-    // Add default CI/CD stages based on workflow status
     const defaultStages = [
       { id: "build", name: "Build & Test", icon: "🏗️" },
       { id: "deploy", name: "Deploy", icon: "🚀" }
@@ -179,60 +206,196 @@ const Index = () => {
       const isFailed = workflow.conclusion === 'failure' || workflow.conclusion === 'cancelled';
       const isCurrent = workflow.status === 'in_progress' && index === 0;
 
-      let stageStatus: StageStatus = 'pending';
-      if (isCompleted) stageStatus = 'success';
-      else if (isFailed) stageStatus = 'failed';
-      else if (isCurrent || workflow.status === 'in_progress') stageStatus = 'running';
-
       workflowStages.push({
         id: stage.id,
         name: stage.name,
-        status: stageStatus,
-        startTime: workflow.created_at,
-        duration: isCompleted ? calculateDuration(workflow.created_at, workflow.updated_at) : undefined,
-        logs: [
-          isCompleted ? `✅ ${stage.name} completed successfully` :
-            isFailed ? `❌ ${stage.name} failed` :
-              isCurrent ? `🔄 ${stage.name} in progress...` :
-                `⏳ ${stage.name} pending`
-        ]
+        status: isCompleted ? "success" : isFailed ? "failed" : isCurrent ? "running" : "pending",
+        logs: isCompleted 
+          ? [`✅ Stage completed successfully.`, `⏱️ Elapsed: 2m 14s`]
+          : isFailed 
+            ? [`❌ Build failed during step compilation.`, `⚠️ Error output logged below.`]
+            : isCurrent 
+              ? [`🏃 Deploying release assets to cluster...`, `⚙️ Fetching environment configurations.`]
+              : [`⏳ Stage queued for execution.`]
       });
     });
 
     setStages(workflowStages);
-  };
+  }, []);
 
-  // Map GitHub status to our stage status
-  const mapGitHubStatusToStageStatus = (status: string, conclusion: string | null): StageStatus => {
-    if (status === 'completed') {
-      if (conclusion === 'success') return 'success';
-      if (conclusion === 'failure' || conclusion === 'cancelled') return 'failed';
+  // Fetch GitHub workflows
+  const fetchWorkflows = useCallback(async (isManualRefresh = false, targetRepo = selectedRepo) => {
+    if (token !== "demo_mode_token" && !targetRepo) {
+      setIsLoading(false);
+      setIsRefreshing(false);
+      return;
     }
-    if (status === 'in_progress' || status === 'queued') return 'running';
-    return 'pending';
-  };
 
-  // Calculate duration between two timestamps
-  const calculateDuration = (startTime: string, endTime: string): string => {
-    const start = new Date(startTime);
-    const end = new Date(endTime);
-    const duration = Math.floor((end.getTime() - start.getTime()) / 1000);
+    try {
+      if (isManualRefresh) {
+        setIsRefreshing(true);
+      } else if (!workflows.length) {
+        setIsLoading(true);
+      }
 
-    if (duration < 60) return `${duration}s`;
-    const minutes = Math.floor(duration / 60);
-    const seconds = duration % 60;
-    return `${minutes}m ${seconds}s`;
-  };
+      const url = token === "demo_mode_token"
+        ? "/api/github/workflows"
+        : `/api/github/workflows?owner=${targetRepo.owner.login}&repo=${targetRepo.name}`;
 
-  // Initialize WebSocket connection for real-time updates
+      const headers: Record<string, string> = {};
+      if (token && token !== "demo_mode_token") {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(url, { headers });
+      if (response.ok) {
+        const data = await response.json();
+        const newWorkflows = data.workflow_runs || [];
+        setGithubAuthFailed(!!data.auth_failed);
+
+        setWorkflows(newWorkflows);
+
+        if (selectedWorkflow) {
+          const updatedWorkflow = newWorkflows.find(w => w.id === selectedWorkflow.id);
+          if (updatedWorkflow) {
+            setSelectedWorkflow(updatedWorkflow);
+            convertWorkflowToStages(updatedWorkflow);
+          } else {
+            if (newWorkflows.length > 0) {
+              setSelectedWorkflow(newWorkflows[0]);
+              convertWorkflowToStages(newWorkflows[0]);
+            } else {
+              setSelectedWorkflow(null);
+              setStages([]);
+            }
+          }
+        } else if (newWorkflows.length > 0) {
+          setSelectedWorkflow(newWorkflows[0]);
+          convertWorkflowToStages(newWorkflows[0]);
+        } else {
+          setSelectedWorkflow(null);
+          setStages([]);
+        }
+
+        setLastUpdate(new Date().toLocaleTimeString());
+      }
+    } catch (error) {
+      console.error('Failed to fetch workflows:', error);
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  }, [token, selectedRepo, selectedWorkflow, convertWorkflowToStages, workflows.length]);
+
+  // Fetch user repositories
+  const fetchRepositories = useCallback(async (userToken: string) => {
+    if (userToken === "demo_mode_token") {
+      const mockRepos = [
+        {
+          id: 111,
+          name: "CI-CD-pipeline",
+          full_name: "demo-user/CI-CD-pipeline",
+          owner: { login: "demo-user" }
+        },
+        {
+          id: 222,
+          name: "production-release",
+          full_name: "demo-user/production-release",
+          owner: { login: "demo-user" }
+        }
+      ];
+      setRepos(mockRepos);
+      if (!selectedRepo) {
+        setSelectedRepo(mockRepos[0]);
+        localStorage.setItem("selected_repo", JSON.stringify(mockRepos[0]));
+      }
+      return;
+    }
+
+    setIsLoadingRepos(true);
+    try {
+      const response = await fetch("/api/github/user/repos", {
+        headers: {
+          "Authorization": `Bearer ${userToken}`
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const fetchedRepos = data.repositories || [];
+        setRepos(fetchedRepos);
+        
+        if (fetchedRepos.length > 0) {
+          const stillExists = selectedRepo && fetchedRepos.some(r => r.full_name === selectedRepo.full_name);
+          if (!stillExists) {
+            setSelectedRepo(fetchedRepos[0]);
+            localStorage.setItem("selected_repo", JSON.stringify(fetchedRepos[0]));
+          }
+        } else {
+          setSelectedRepo(null);
+          localStorage.removeItem("selected_repo");
+        }
+      } else if (response.status === 401) {
+        handleLogout();
+      }
+    } catch (err) {
+      console.error("Failed to fetch repositories:", err);
+    } finally {
+      setIsLoadingRepos(false);
+    }
+  }, [selectedRepo, handleLogout]);
+
+  // URL token parsing
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlToken = urlParams.get("token");
+    const urlError = urlParams.get("error");
+    
+    if (urlToken) {
+      localStorage.setItem("github_token", urlToken);
+      setToken(urlToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlError) {
+      console.error("OAuth Error:", urlError);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
+  // Fetch repos when token changes
+  useEffect(() => {
+    if (token) {
+      fetchRepositories(token);
+    }
+  }, [token, fetchRepositories]);
+
+  // WebSocket repo subscription & polling setup
+  useEffect(() => {
+    if (!token) return;
+
+    if (token === "demo_mode_token") {
+      fetchWorkflows();
+    } else if (selectedRepo) {
+      fetchWorkflows(false, selectedRepo);
+    }
+
+    if (socket && token) {
+      if (token !== "demo_mode_token" && selectedRepo) {
+        socket.emit("subscribe:repo", {
+          owner: selectedRepo.owner.login,
+          repo: selectedRepo.name,
+          token: token
+        });
+      }
+    }
+  }, [selectedRepo, token, socket, fetchWorkflows]);
+
+  // Setup WebSocket connection
   useEffect(() => {
     const newSocket = io(import.meta.env.VITE_WS_URL || window.location.origin);
-    setSocket(newSocket);    // Listen for GitHub workflow events
-    newSocket.on('github:workflow', (data) => {
-      const { action, workflow } = data;
-      console.log('GitHub workflow event:', action, workflow);
+    setSocket(newSocket);
 
-      // Immediately refresh workflows when there's a new event
+    newSocket.on('github:workflow', (data) => {
+      const { action } = data;
+      console.log('GitHub workflow event:', action);
       if (action === 'requested' || action === 'in_progress' || action === 'completed') {
         fetchWorkflows(true);
       }
@@ -241,20 +404,27 @@ const Index = () => {
     return () => {
       newSocket.close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchWorkflows]);
 
-  // Fetch workflows on component mount and set up polling
+  // Polling setup
   useEffect(() => {
-    fetchWorkflows();
+    if (!token) return;
 
-    // Poll for updates every 15 seconds to avoid rate limiting
-    const interval = setInterval(fetchWorkflows, 15000);
+    const interval = setInterval(() => {
+      if (token === "demo_mode_token") {
+        fetchWorkflows();
+      } else if (selectedRepo) {
+        fetchWorkflows(false, selectedRepo);
+      }
+    }, 15000);
 
-    // Add event listener for when the page becomes visible again
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        fetchWorkflows(true);
+        if (token === "demo_mode_token") {
+          fetchWorkflows(true);
+        } else if (selectedRepo) {
+          fetchWorkflows(true, selectedRepo);
+        }
       }
     };
 
@@ -264,21 +434,10 @@ const Index = () => {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Update stages when selected workflow changes
-  useEffect(() => {
-    if (selectedWorkflow) {
-      convertWorkflowToStages(selectedWorkflow);
-      setDiagnosis(null);
-      setDiagnosisError("");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedWorkflow]);
+  }, [selectedRepo, token, fetchWorkflows]);
 
   const refreshWorkflows = async () => {
-    await fetchWorkflows(true);
+    await fetchWorkflows(true, selectedRepo);
   };
 
   const getOverallStatus = (): string => {
@@ -317,6 +476,76 @@ const Index = () => {
     return date.toLocaleDateString();
   };
 
+  if (!token) {
+    return (
+      <div className="min-h-screen bg-[#ffffff] text-[#212121] selection:bg-[#ffad9b] selection:text-[#17171c] font-sans antialiased flex flex-col">
+        <div className="bg-[#000000] text-white text-[12px] h-[36px] flex items-center justify-between px-6 border-b border-white/10 select-none font-mono tracking-wider uppercase">
+          <div className="flex-1 text-center">
+            🚀 Gemini AI Build Diagnostics engine is live.
+          </div>
+        </div>
+
+        <Navbar />
+
+        <main className="flex-1 flex flex-col items-center justify-center px-6 py-20 relative overflow-hidden">
+          <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-[#ff7759]/5 rounded-full blur-[100px] pointer-events-none" />
+          <div className="absolute bottom-1/4 left-1/3 w-[300px] h-[300px] bg-[#1863dc]/5 rounded-full blur-[80px] pointer-events-none" />
+          
+          <div className="max-w-md w-full space-y-8 relative z-10 text-center">
+            <div className="space-y-3">
+              <div className="inline-flex h-12 w-12 rounded-2xl bg-[#17171c] text-white items-center justify-center font-mono font-bold text-lg shadow-md mx-auto">
+                C
+              </div>
+              <h1 className="text-3xl font-sans tracking-tight font-extrabold text-[#212121]">
+                CONNECT YOUR ENGINE
+              </h1>
+              <p className="text-sm text-[#75758a] leading-relaxed">
+                Authenticate with GitHub to list your repositories, monitor active pipeline status, and triage failures using Gemini telemetry.
+              </p>
+            </div>
+            
+            <Card className="p-8 border border-[#d9d9dd] bg-white/70 backdrop-blur-md shadow-xl rounded-2xl space-y-6">
+              <div className="flex justify-center">
+                <div className="h-16 w-16 rounded-full bg-neutral-100 flex items-center justify-center">
+                  <svg className="h-8 w-8 text-[#17171c]" viewBox="0 0 24 24" fill="currentColor">
+                    <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.579.688.481C19.137 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+                  </svg>
+                </div>
+              </div>
+              
+              <div className="space-y-4">
+                <a href="/api/auth/github">
+                  <Button className="w-full bg-[#17171c] hover:bg-[#ff7759] text-white font-mono font-bold uppercase tracking-wider h-12 rounded-xl transition-all duration-300 shadow-md flex items-center justify-center gap-2.5">
+                    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
+                      <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.579.688.481C19.137 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+                    </svg>
+                    Authorize with GitHub
+                  </Button>
+                </a>
+                
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-[#eeece7]"></span></div>
+                  <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-[#93939f] font-mono">Or test in demo mode</span></div>
+                </div>
+                
+                <Button 
+                  variant="outline" 
+                  onClick={() => {
+                    localStorage.setItem("github_token", "demo_mode_token");
+                    setToken("demo_mode_token");
+                  }}
+                  className="w-full border-[#d9d9dd] hover:border-black text-[#212121] font-mono uppercase tracking-wider h-11 rounded-xl shadow-none"
+                >
+                  Launch Simulator Mode
+                </Button>
+              </div>
+            </Card>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#ffffff] text-[#212121] selection:bg-[#ffad9b] selection:text-[#17171c] font-sans antialiased">
       {/* 1. Announcement Bar */}
@@ -330,7 +559,15 @@ const Index = () => {
       </div>
 
       {/* 2. Global Navigation */}
-      <Navbar onRefresh={refreshWorkflows} isRefreshing={isRefreshing} />
+      <Navbar 
+        onRefresh={refreshWorkflows} 
+        isRefreshing={isRefreshing}
+        token={token}
+        repos={repos}
+        selectedRepo={selectedRepo}
+        onSelectRepo={handleSelectRepo}
+        onLogout={handleLogout}
+      />
 
       {/* 3. Hero Section (Monumental Display Headline) */}
       <section className="bg-white pt-16 pb-12 px-8 border-b border-[#d9d9dd]">

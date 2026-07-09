@@ -60,6 +60,22 @@ const octokit = new Octokit({
     auth: process.env.GITHUB_TOKEN
 });
 
+// Helper to get Octokit instance dynamically based on client authorization header
+const getOctokit = (req) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7);
+        if (token === 'demo_mode_token') {
+            return null; // Return null to signal demo/simulator mode
+        }
+        return new Octokit({ auth: token });
+    }
+    if (process.env.GITHUB_TOKEN) {
+        return octokit;
+    }
+    return null;
+};
+
 // Log authentication status on startup
 console.log('🔧 Environment:', process.env.NODE_ENV || 'development');
 console.log('🌍 Configured Frontend URLs:', frontendUrls.join(', ') || 'None');
@@ -183,14 +199,100 @@ const checkWorkflowChanges = async () => {
 };
 
 // Check for workflow changes every 30 seconds to avoid rate limiting
-setInterval(checkWorkflowChanges, 30000);
+// Only runs if a default token is configured
+if (process.env.GITHUB_TOKEN) {
+    setInterval(checkWorkflowChanges, 30000);
+}
+
+// Keep track of active socket subscriptions
+const socketSubscriptions = new Map();
 
 // WebSocket connection handling
 io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
+    socket.on('subscribe:repo', ({ owner, repo, token }) => {
+        console.log(`Socket ${socket.id} subscribing to ${owner}/${repo}`);
+        
+        // Clean up existing subscription for this socket
+        if (socketSubscriptions.has(socket.id)) {
+            clearInterval(socketSubscriptions.get(socket.id).intervalId);
+        }
+
+        if (!owner || !repo) {
+            return;
+        }
+
+        // Return early for demo/simulation token to avoid API polling
+        if (token === 'demo_mode_token') {
+            console.log(`[Socket ${socket.id}] Subscribed to ${owner}/${repo} in demo mode`);
+            return;
+        }
+
+        const userOctokit = token ? new Octokit({ auth: token }) : octokit;
+        const lastWorkflowCheckForSocket = new Map();
+
+        const checkWorkflows = async () => {
+            try {
+                const response = await userOctokit.rest.actions.listWorkflowRunsForRepo({
+                    owner,
+                    repo,
+                    per_page: 5
+                });
+                const workflows = response.data.workflow_runs || [];
+
+                workflows.forEach(workflow => {
+                    const lastKnown = lastWorkflowCheckForSocket.get(workflow.id);
+                    if (!lastKnown || lastKnown.status !== workflow.status || lastKnown.conclusion !== workflow.conclusion) {
+                        socket.emit('github:workflow', {
+                            action: workflow.status === 'in_progress' ? 'in_progress' :
+                                    workflow.status === 'completed' ? 'completed' : 'requested',
+                            workflow: {
+                                id: workflow.id,
+                                name: workflow.name,
+                                status: workflow.status,
+                                conclusion: workflow.conclusion,
+                                html_url: workflow.html_url,
+                                created_at: workflow.created_at,
+                                updated_at: workflow.updated_at
+                            },
+                            timestamp: new Date().toISOString()
+                        });
+                        console.log(`[Socket ${socket.id}] Workflow status change detected: ${workflow.name} - ${workflow.status}`);
+                    }
+                    lastWorkflowCheckForSocket.set(workflow.id, {
+                        status: workflow.status,
+                        conclusion: workflow.conclusion
+                    });
+                });
+            } catch (error) {
+                if (error.status === 403 && error.message.includes('rate limit')) {
+                    console.log(`[Socket ${socket.id}] Rate limit hit, will retry next cycle`);
+                } else {
+                    console.error(`[Socket ${socket.id}] Error checking workflow changes:`, error.message);
+                }
+            }
+        };
+
+        // Poll every 30 seconds
+        const intervalId = setInterval(checkWorkflows, 30000);
+        
+        // Run immediately on subscription
+        checkWorkflows();
+
+        socketSubscriptions.set(socket.id, {
+            owner,
+            repo,
+            intervalId
+        });
+    });
+
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
+        if (socketSubscriptions.has(socket.id)) {
+            clearInterval(socketSubscriptions.get(socket.id).intervalId);
+            socketSubscriptions.delete(socket.id);
+        }
     });
 });
 
@@ -225,11 +327,102 @@ app.post('/api/deploy', async (req, res) => {
     }
 });
 
+// OAuth Authentication Routes
+app.get('/api/auth/github', (req, res) => {
+    console.log('🔄 OAuth: Initiating GitHub login redirection...');
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+    
+    if (!clientId || !clientSecret) {
+        console.warn('⚠️ OAuth: Missing GitHub App Client ID or Secret in environment variables!');
+        return res.status(400).send(`
+            <h2>GitHub OAuth App is not configured on the server.</h2>
+            <p>Please add <code>GITHUB_CLIENT_ID</code> and <code>GITHUB_CLIENT_SECRET</code> to your <code>.env</code> file.</p>
+            <p>You can create a GitHub OAuth application at <a href="https://github.com/settings/developers" target="_blank">GitHub Developer Settings</a> with the callback URL: <code>${req.protocol}://${req.get('host')}/api/auth/github/callback</code></p>
+        `);
+    }
+    
+    let githubUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&scope=repo,workflow`;
+    const redirectUri = process.env.GITHUB_REDIRECT_URI;
+    if (redirectUri) {
+        console.log(`🔗 OAuth: Using configured redirect_uri: ${redirectUri}`);
+        githubUrl += `&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    } else {
+        console.log('🔗 OAuth: Omitting redirect_uri to let GitHub fall back to default callback URL');
+    }
+    res.redirect(githubUrl);
+});
+
+app.get('/api/auth/github/callback', async (req, res) => {
+    const { code } = req.query;
+    const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+    console.log('📥 OAuth: Callback received. Code query parameter present:', !!code);
+    if (!code) {
+        console.warn('⚠️ OAuth: No authorization code received from GitHub.');
+        return res.redirect(`${frontendUrl}/?error=no_code_provided`);
+    }
+    try {
+        console.log('⚡ OAuth: Exchanging authorization code for GitHub access token...');
+        const response = await fetch('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                client_id: process.env.GITHUB_CLIENT_ID,
+                client_secret: process.env.GITHUB_CLIENT_SECRET,
+                code
+            })
+        });
+        const data = await response.json();
+        if (data.error) {
+            console.error('❌ OAuth: Token exchange error:', data.error_description || data.error);
+            return res.redirect(`${frontendUrl}/?error=${encodeURIComponent(data.error_description || data.error)}`);
+        }
+        const token = data.access_token;
+        console.log(`✅ OAuth: Token exchanged successfully! Redirecting to frontend: ${frontendUrl}`);
+        res.redirect(`${frontendUrl}/?token=${token}`);
+    } catch (error) {
+        console.error('❌ OAuth: Callback exception occurred:', error);
+        res.redirect(`${frontendUrl}/?error=${encodeURIComponent(error.message)}`);
+    }
+});
+
+app.get('/api/github/user/repos', async (req, res) => {
+    try {
+        const userOctokit = getOctokit(req);
+        if (!userOctokit) {
+            return res.status(401).json({ error: 'GitHub Authentication Required' });
+        }
+        const response = await userOctokit.rest.repos.listForAuthenticatedUser({
+            sort: 'pushed',
+            per_page: 100
+        });
+        res.json({ repositories: response.data || [] });
+    } catch (error) {
+        console.error('Failed to fetch repositories:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/github/workflows', async (req, res) => {
     try {
-        const response = await octokit.rest.actions.listWorkflowRunsForRepo({
-            owner: process.env.GITHUB_OWNER || 'utkarsh232005',
-            repo: process.env.GITHUB_REPO || 'CI-CD',
+        const owner = req.query.owner || process.env.GITHUB_OWNER || 'utkarsh232005';
+        const repo = req.query.repo || process.env.GITHUB_REPO || 'CI-CD';
+        
+        const userOctokit = getOctokit(req);
+        if (!userOctokit) {
+            return res.json({
+                workflow_runs: mockWorkflows,
+                auth_failed: true,
+                error: 'Demo Mode: Running with simulated workflow telemetry.'
+            });
+        }
+
+        const response = await userOctokit.rest.actions.listWorkflowRunsForRepo({
+            owner,
+            repo,
             per_page: 10
         });
 
@@ -271,8 +464,8 @@ function getGeminiClient() {
 app.post('/api/github/workflows/:run_id/diagnose', async (req, res) => {
     try {
         const { run_id } = req.params;
-        const owner = process.env.GITHUB_OWNER || 'utkarsh232005';
-        const repo = process.env.GITHUB_REPO || 'CI-CD';
+        const owner = req.query.owner || process.env.GITHUB_OWNER || 'utkarsh232005';
+        const repo = req.query.repo || process.env.GITHUB_REPO || 'CI-CD';
 
         // Check if Gemini API key exists
         if (!process.env.GEMINI_API_KEY) {
@@ -331,8 +524,13 @@ Error: Build failed with 1 error:
 `;
         } else {
             try {
+                const userOctokit = getOctokit(req);
+                if (!userOctokit) {
+                    throw new Error("GitHub Authentication Required for live diagnostics");
+                }
+
                 // 1. Fetch workflow run details
-                const runResponse = await octokit.rest.actions.getWorkflowRun({
+                const runResponse = await userOctokit.rest.actions.getWorkflowRun({
                     owner,
                     repo,
                     run_id: runIdInt
@@ -340,7 +538,7 @@ Error: Build failed with 1 error:
                 run = runResponse.data;
 
                 // 2. Fetch jobs
-                const jobsResponse = await octokit.rest.actions.listJobsForWorkflowRun({
+                const jobsResponse = await userOctokit.rest.actions.listJobsForWorkflowRun({
                     owner,
                     repo,
                     run_id: runIdInt
@@ -353,7 +551,7 @@ Error: Build failed with 1 error:
                 for (const job of failedJobs) {
                     logsContext += `\n--- LOGS FOR JOB: ${job.name} (ID: ${job.id}) ---\n`;
                     try {
-                        const logRes = await octokit.rest.actions.downloadJobLogsForWorkflowRun({
+                        const logRes = await userOctokit.rest.actions.downloadJobLogsForWorkflowRun({
                             owner,
                             repo,
                             job_id: job.id
@@ -399,28 +597,7 @@ Error: Build failed with 1 error:
                         ]
                     }
                 ];
-                logsContext = `
---- LOGS FOR JOB: Build & Test (ID: 99991) ---
-npm run build
-
-> vite_react_shadcn_ts@0.0.0 build
-> vite build
-
-vite v5.4.21 building for production...
-transforming...
-✓ 124 modules transformed.
-[vite:css] [postcss] /src/index.css:220:1: You cannot \`@apply\` the \`gap-3\` utility here because it creates a circular dependency.
-file: /src/index.css:220:0
-    at Input.error (/node_modules/postcss/lib/input.js:135:16)
-    at Rule.error (/node_modules/postcss/lib/node.js:149:32)
-    at processApply (/node_modules/tailwindcss/lib/lib/expandApplyAtRules.js:443:32)
-    at /node_modules/tailwindcss/lib/lib/expandApplyAtRules.js:551:9
-    at /node_modules/tailwindcss/lib/processTailwindFeatures.js:55:50
-    at async plugins (/node_modules/tailwindcss/lib/plugin.js:38:17)
-    at async LazyResult.runAsync (/node_modules/postcss/lib/lazy-result.js:293:11)
-Error: Build failed with 1 error:
-/src/index.css:220:1: postcss: You cannot \`@apply\` the \`gap-3\` utility here because it creates a circular dependency.
-`;
+                logsContext = `[Simulation Fallback Mode - Live Octokit API returned error: ${githubErr.message}]`;
             }
         }
 

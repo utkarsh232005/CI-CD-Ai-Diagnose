@@ -4,12 +4,34 @@ import { Menu, X, ExternalLink, BarChart3, RefreshCw, Activity } from "lucide-re
 import { motion, AnimatePresence } from "motion/react";
 import { Button } from "@/components/ui/button";
 
+interface GitHubRepository {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: {
+    login: string;
+  };
+}
+
 interface NavbarProps {
   onRefresh?: () => void;
   isRefreshing?: boolean;
+  token?: string | null;
+  repos?: GitHubRepository[];
+  selectedRepo?: GitHubRepository | null;
+  onSelectRepo?: (repo: GitHubRepository) => void;
+  onLogout?: () => void;
 }
 
-export const Navbar = ({ onRefresh, isRefreshing = false }: NavbarProps) => {
+export const Navbar = ({ 
+  onRefresh, 
+  isRefreshing = false,
+  token = null,
+  repos = [],
+  selectedRepo = null,
+  onSelectRepo,
+  onLogout
+}: NavbarProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const location = useLocation();
 
@@ -37,7 +59,7 @@ export const Navbar = ({ onRefresh, isRefreshing = false }: NavbarProps) => {
         </Link>
 
         {/* Desktop Navigation Links */}
-        <div className="hidden md:flex items-center gap-8">
+        <div className="hidden md:flex items-center gap-6">
           {navLinks.map((link) => (
             <Link
               key={link.name}
@@ -54,15 +76,55 @@ export const Navbar = ({ onRefresh, isRefreshing = false }: NavbarProps) => {
               )}
             </Link>
           ))}
-          <a
-            href="https://github.com"
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-1 text-xs font-mono font-bold uppercase tracking-wider text-[#75758a] hover:text-black transition-colors duration-200"
-          >
-            GitHub Source
-            <ExternalLink className="h-3 w-3 text-[#93939f]" />
-          </a>
+
+          {/* Repo Selector */}
+          {token && repos && repos.length > 0 && (
+            <div className="relative flex items-center">
+              <select 
+                value={selectedRepo ? selectedRepo.full_name : ""}
+                onChange={(e) => {
+                  const repo = repos.find(r => r.full_name === e.target.value);
+                  if (repo && onSelectRepo) onSelectRepo(repo);
+                }}
+                className="bg-[#eeece7] hover:bg-[#d9d9dd] border-0 text-[#212121] text-xs font-mono font-bold uppercase tracking-wider py-1.5 px-3 rounded-lg appearance-none cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#ff7759] pr-8 shadow-sm transition-all"
+              >
+                <option value="" disabled>Select Repo</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.full_name}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+              <div className="absolute right-2.5 pointer-events-none text-[#75758a]">
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+            </div>
+          )}
+
+          {/* User Info / Sign Out */}
+          {token && (
+            <Button 
+              variant="ghost" 
+              onClick={onLogout}
+              className="text-[10px] font-mono text-[#75758a] hover:text-[#b30000] uppercase tracking-wider font-bold h-9 px-3 rounded-lg"
+            >
+              Sign Out
+            </Button>
+          )}
+
+          {!token && (
+            <a
+              href="https://github.com"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1 text-xs font-mono font-bold uppercase tracking-wider text-[#75758a] hover:text-black transition-colors duration-200"
+            >
+              GitHub Source
+              <ExternalLink className="h-3 w-3 text-[#93939f]" />
+            </a>
+          )}
         </div>
 
         {/* Mobile Menu Button */}
@@ -100,15 +162,60 @@ export const Navbar = ({ onRefresh, isRefreshing = false }: NavbarProps) => {
                   {link.name}
                 </Link>
               ))}
-              <a
-                href="https://github.com"
-                target="_blank"
-                rel="noreferrer"
-                className="py-2 text-xs font-mono font-bold uppercase tracking-wider text-[#75758a] hover:text-black block flex items-center gap-1.5"
-              >
-                GitHub Source
-                <ExternalLink className="h-3 w-3" />
-              </a>
+
+              {token && repos && repos.length > 0 && (
+                <div className="py-2 border-b border-neutral-100 flex flex-col gap-1.5">
+                  <span className="text-[10px] font-mono text-[#93939f] uppercase tracking-wider">Repository</span>
+                  <div className="relative flex items-center w-full">
+                    <select 
+                      value={selectedRepo ? selectedRepo.full_name : ""}
+                      onChange={(e) => {
+                        const repo = repos.find(r => r.full_name === e.target.value);
+                        if (repo && onSelectRepo) {
+                          onSelectRepo(repo);
+                          setIsOpen(false);
+                        }
+                      }}
+                      className="w-full bg-[#eeece7] hover:bg-[#d9d9dd] border-0 text-[#212121] text-xs font-mono font-bold uppercase tracking-wider py-2 px-3 rounded-lg appearance-none cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#ff7759] pr-8 shadow-sm transition-all"
+                    >
+                      <option value="" disabled>Select Repo</option>
+                      {repos.map((r) => (
+                        <option key={r.id} value={r.full_name}>
+                          {r.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="absolute right-2.5 pointer-events-none text-[#75758a]">
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {token ? (
+                <Button 
+                  variant="ghost" 
+                  onClick={() => {
+                    if (onLogout) onLogout();
+                    setIsOpen(false);
+                  }}
+                  className="w-full justify-start text-[10px] font-mono text-[#b30000] hover:text-red-700 uppercase tracking-wider font-bold h-9 px-0 hover:bg-transparent"
+                >
+                  Sign Out
+                </Button>
+              ) : (
+                <a
+                  href="https://github.com"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="py-2 text-xs font-mono font-bold uppercase tracking-wider text-[#75758a] hover:text-black block flex items-center gap-1.5"
+                >
+                  GitHub Source
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
             </div>
           </motion.div>
         )}
