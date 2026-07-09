@@ -629,7 +629,7 @@ ${logsContext || 'No log details available.'}
 
         const ai = getGeminiClient();
         const aiResponse = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
+            model: "gemini-2.5-flash",
             contents: prompt,
             config: {
                 systemInstruction: "You are an elite DevOps and CI/CD engineer specializing in GitHub Actions. Analyze the provided workflow runs, jobs, steps, and log files to identify the exact cause of a failure. Provide a concise, clear diagnosis, specify the category of error, pinpoint the root cause, and list highly actionable suggested fixes.",
